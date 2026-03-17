@@ -1,42 +1,17 @@
 # config.py
 from dataclasses import dataclass
 from pathlib import Path
-import urllib.parse
 
-# Base directory of the repo (reliable in Streamlit Cloud)
+# Base directory of the repo
 BASE_DIR = Path(__file__).resolve().parent
 
 # -----------------------------
 # Data / files
 # -----------------------------
-# Google Sheet ID (from your link)
-SHEET_ID = "1XVrJ1lz-oIf9AjnKtyuzb8PmH9zk2nPy1aZ1VEotubA"
 
-# The main data tab is gid=0 in your link.
-DATA_GID = "0"
-
-# "MAO Tiers" is a second tab in the same sheet.
-MAO_TIERS_SHEET_NAME = "MAO Tiers"
-
-def gsheet_csv_url(*, sheet_id: str, gid: str | None = None, sheet_name: str | None = None) -> str:
-    """Public Google Sheets -> CSV export URL.
-    Works when the sheet is shared publicly ("Anyone with the link" can view).
-    Prefer gid; fall back to sheet_name.
-    """
-    base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
-    if gid is not None:
-        return f"{base}&gid={gid}"
-    if sheet_name is not None:
-        return f"{base}&sheet={urllib.parse.quote(sheet_name)}"
-    raise ValueError("Provide gid or sheet_name")
-
-# Main dataset CSV (Sold/Cut Loose rows)
-SHEET_URL = gsheet_csv_url(sheet_id=SHEET_ID, gid=DATA_GID)
-
-# Live MAO tiers CSV (from the 'MAO Tiers' tab)
-MAO_TIERS_URL = gsheet_csv_url(sheet_id=SHEET_ID, sheet_name=MAO_TIERS_SHEET_NAME)
-
-REQUIRED_COLS = {"Address", "City", "County", "Salesforce_URL"}
+# Columns that must be present after loading + renaming from Supabase
+# (City is not in Supabase; it is added as an empty column in data.py)
+REQUIRED_COLS = {"Address", "County", "Salesforce_URL"}
 
 # GeoJSON file (local, in repo root)
 GEOJSON_LOCAL_PATH = BASE_DIR / "tn_counties.geojson"
@@ -62,6 +37,8 @@ MAP_DEFAULTS = dict(
 
 # -----------------------------
 # Column names (single source of truth)
+# These are the names used throughout the app AFTER Supabase columns
+# have been renamed in data.py.
 # -----------------------------
 @dataclass(frozen=True)
 class Cols:
@@ -74,4 +51,3 @@ class Cols:
     date: str = "Date"
 
 C = Cols()
-

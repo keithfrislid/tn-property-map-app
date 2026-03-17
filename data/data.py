@@ -1,22 +1,24 @@
-import io
 import re
 import pandas as pd
-import requests
 import streamlit as st
 
-from core.config import SHEET_URL, MAO_TIERS_URL, REQUIRED_COLS, C
+from core.config import REQUIRED_COLS, C
+
+
+# -------------------------
+# Supabase client
+# -------------------------
+
+def _get_supabase_client():
+    from supabase import create_client
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return create_client(url, key)
 
 
 # -------------------------
 # Low-level helpers
 # -------------------------
-
-def _read_csv(url: str) -> pd.DataFrame:
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers, timeout=30)
-    r.raise_for_status()
-    return pd.read_csv(io.StringIO(r.text))
-
 
 def _normalize_county_key(x: str) -> str:
     """
@@ -38,29 +40,29 @@ def _normalize_status(series: pd.Series) -> pd.Series:
       - 'sold'
       - 'cut loose'
     Everything else becomes ''.
+    Handles both Google Sheets values and Supabase `path` values.
     """
     s = series.fillna("").astype(str).str.strip().str.lower()
     compact = (
-        s.str.replace(r"[\s\-_]+", "", regex=True)
+        s.str.replace(r"[\s\-_/]+", "", regex=True)
          .str.replace(r"[^a-z]", "", regex=True)
     )
 
     out = pd.Series([""] * len(s), index=s.index, dtype="object")
-    out.loc[compact.isin(["sold", "closed", "close", "closing", "settled"])] = "sold"
-    out.loc[compact.isin(["cutloose", "cutlose", "cut"])] = "cut loose"
+    # Sold — covers "sold", "closed", "closedwon" (Supabase "Closed/Won")
+    out.loc[compact.isin(["sold", "closed", "close", "closing", "settled", "closedwon"])] = "sold"
+    # Cut Loose — covers "cutloose", "contractcancelledlost" (Supabase path)
+    out.loc[compact.isin(["cutloose", "cutlose", "cut", "contractcancelledlost"])] = "cut loose"
     return out
 
+
 def _to_number(series: pd.Series) -> pd.Series:
-    """
-    Convert money-like strings to floats.
-    Examples: "$74,000" -> 74000.0 ; "" -> NaN
-    """
+    """Convert money-like strings to floats. "$74,000" -> 74000.0 ; "" -> NaN"""
     if series is None:
         return pd.Series(dtype="float64")
     s = series.astype(str).str.replace(r"[\$,]", "", regex=True).str.strip()
     s = s.replace({"": None, "nan": None, "None": None})
     return pd.to_numeric(s, errors="coerce")
-
 
 
 # -------------------------
@@ -69,7 +71,7 @@ def _to_number(series: pd.Series) -> pd.Series:
 
 def normalize_inputs(df: pd.DataFrame) -> pd.DataFrame:
     """
-    One place to harden and normalize the raw deals sheet.
+    One place to harden and normalize the raw deals data.
 
     Guarantees these columns exist and are correct:
       - County_clean_up, County_key
@@ -80,55 +82,43 @@ def normalize_inputs(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
 
-    # Ensure expected columns exist (even if the sheet changes)
-    # (Do not remove columns; only add missing ones.)
+    # Ensure expected columns exist (even if source changes)
     optional_cols = [
-    "Salesforce_URL", "Buyer", "Date", "Status", "County", "Address", "City",
-    "Dispo Rep", "Contract Price", "Amended Price", "Wholesale Price", "Market", "Acquisition Rep",
-]
-
+        "Salesforce_URL", "Buyer", "Date", "Status", "County", "Address", "City",
+        "Dispo Rep", "Contract Price", "Amended Price", "Wholesale Price",
+        "Market", "Acquisition Rep",
+    ]
     for col in optional_cols:
         if col not in df.columns:
             df[col] = ""
 
     # --- County normalization ---
     county_raw = df[C.county].astype(str).fillna("").str.strip().str.upper()
-
-    # Strip trailing " COUNTY" because GeoJSON + app logic use "DAVIDSON", not "DAVIDSON COUNTY"
     county_clean = county_raw.str.replace(r"\s+COUNTY\b", "", regex=True).str.strip()
-
-    # Known historical typo fix (keep it centralized here)
     county_clean = county_clean.replace({"STEWART COUTY": "STEWART"})
-
     df["County_clean_up"] = county_clean
     df["County_key"] = df["County_clean_up"].apply(_normalize_county_key)
 
     # --- Buyer normalization ---
-    df["Buyer_clean"] = df[C.buyer].astype(str).fillna("").astype(str).str.strip()
+    df["Buyer_clean"] = df[C.buyer].astype(str).fillna("").str.strip()
 
     # --- Status normalization ---
     df["Status_norm"] = _normalize_status(df[C.status])
 
-    # --- Date parsing (momentum.py expects Date_dt) ---
+    # --- Date parsing ---
     df["Date_dt"] = pd.to_datetime(df.get(C.date), errors="coerce")
     df["Year"] = df["Date_dt"].dt.year
 
-        # --- Dispo Rep (new column) ---
-    # Accept a few possible header spellings
+    # --- Dispo Rep ---
     dispo_col = None
     for cand in ["Dispo Rep", "Dispo_Rep", "DispoRep", "DISPO REP"]:
         if cand in df.columns:
             dispo_col = cand
             break
-
-    if dispo_col is None:
-        df["Dispo_Rep"] = ""
-    else:
-        df["Dispo_Rep"] = df[dispo_col]
-
+    df["Dispo_Rep"] = df[dispo_col] if dispo_col else ""
     df["Dispo_Rep_clean"] = df["Dispo_Rep"].astype(str).fillna("").str.strip()
 
-        # --- Market + Acquisition Rep (clean) ---
+    # --- Market + Acquisition Rep ---
     if "Market" not in df.columns:
         df["Market"] = ""
     df["Market_clean"] = df["Market"].astype(str).fillna("").str.strip()
@@ -138,16 +128,16 @@ def normalize_inputs(df: pd.DataFrame) -> pd.DataFrame:
     df["Acquisition_Rep_clean"] = df["Acquisition Rep"].astype(str).fillna("").str.strip()
 
     # --- Financials (numeric) ---
-    df["Contract_Price_num"] = _to_number(df["Contract Price"]) if "Contract Price" in df.columns else pd.Series([None] * len(df))
-    df["Amended_Price_num"] = _to_number(df["Amended Price"]) if "Amended Price" in df.columns else pd.Series([None] * len(df))
-    df["Wholesale_Price_num"] = _to_number(df["Wholesale Price"]) if "Wholesale Price" in df.columns else pd.Series([None] * len(df))
+    df["Contract_Price_num"] = _to_number(df.get("Contract Price"))
+    df["Amended_Price_num"] = _to_number(df.get("Amended Price"))
+    df["Wholesale_Price_num"] = _to_number(df.get("Wholesale Price"))
 
-    # Effective contract price = amended if present else contract
+    # Effective contract price = amended if present, else contract
     df["Effective_Contract_Price"] = df["Contract_Price_num"]
     has_amended = df["Amended_Price_num"].notna()
     df.loc[has_amended, "Effective_Contract_Price"] = df.loc[has_amended, "Amended_Price_num"]
 
-    # Gross Profit = Wholesale - Effective Contract (only when both exist)
+    # Gross Profit = Wholesale - Effective Contract
     df["Gross_Profit"] = df["Wholesale_Price_num"] - df["Effective_Contract_Price"]
 
     return df
@@ -155,9 +145,8 @@ def normalize_inputs(df: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_tiers(tiers: pd.DataFrame) -> pd.DataFrame:
     """
-    One place to normalize the MAO tiers sheet so it matches the rest of the app.
-    Returns:
-      County_clean_up, County_key, MAO_Tier, MAO_Range_Str
+    Normalize the MAO tiers data into the format expected by the app.
+    Returns: County_clean_up, County_key, MAO_Tier, MAO_Range_Str
     """
     out_cols = ["County_clean_up", "County_key", "MAO_Tier", "MAO_Range_Str"]
     if tiers is None or tiers.empty:
@@ -166,44 +155,30 @@ def normalize_tiers(tiers: pd.DataFrame) -> pd.DataFrame:
     tiers = tiers.copy()
     tiers.columns = [str(c).strip() for c in tiers.columns]
 
-    # County column
-    county_col = None
-    for c in tiers.columns:
-        if str(c).strip().lower() in ("county", "county_name", "countyname"):
-            county_col = c
-            break
-    if county_col is None:
-        county_col = tiers.columns[0]  # fallback
+    # County column (case-insensitive search)
+    county_col = next(
+        (c for c in tiers.columns if str(c).strip().lower() in ("county", "county_name", "countyname")),
+        tiers.columns[0],
+    )
 
     # Tier column
-    tier_col = None
-    for c in tiers.columns:
-        lc = str(c).strip().lower()
-        if lc in ("tier", "mao tier", "mao_tier"):
-            tier_col = c
-            break
+    tier_col = next(
+        (c for c in tiers.columns if str(c).strip().lower() in ("tier", "mao tier", "mao_tier")),
+        None,
+    )
 
-    # Optional single range column
-    range_col = None
-    for c in tiers.columns:
-        lc = str(c).strip().lower()
-        if lc in ("mao range", "mao_range", "range"):
-            range_col = c
-            break
-
-    # Min/Max columns (your sheet uses these)
-    min_col = None
-    max_col = None
-    for c in tiers.columns:
-        lc = str(c).strip().lower()
-        if lc in ("mao min", "mao_min", "min"):
-            min_col = c
-        if lc in ("mao max", "mao_max", "max"):
-            max_col = c
+    # Min/Max columns
+    min_col = next(
+        (c for c in tiers.columns if str(c).strip().lower() in ("mao min", "mao_min", "min")),
+        None,
+    )
+    max_col = next(
+        (c for c in tiers.columns if str(c).strip().lower() in ("mao max", "mao_max", "max")),
+        None,
+    )
 
     df = pd.DataFrame()
 
-    # Normalize county display name the same way as deals sheet
     county_raw = tiers[county_col].astype(str).fillna("").str.strip().str.upper()
     county_clean = county_raw.str.replace(r"\s+COUNTY\b", "", regex=True).str.strip()
     county_clean = county_clean.replace({"STEWART COUTY": "STEWART"})
@@ -212,16 +187,11 @@ def normalize_tiers(tiers: pd.DataFrame) -> pd.DataFrame:
 
     df["MAO_Tier"] = tiers[tier_col].astype(str).str.strip() if tier_col else ""
 
-    # Build MAO_Range_Str
-    if range_col and range_col in tiers.columns:
-        df["MAO_Range_Str"] = tiers[range_col].astype(str).str.strip()
-    elif min_col and max_col and min_col in tiers.columns and max_col in tiers.columns:
+    if min_col and max_col:
         def to_pct(x):
             try:
                 v = float(x)
-                if v <= 1.0:
-                    v *= 100.0
-                return v
+                return v * 100.0 if v <= 1.0 else v
             except Exception:
                 return None
 
@@ -245,26 +215,84 @@ def normalize_tiers(tiers: pd.DataFrame) -> pd.DataFrame:
 
 
 # -------------------------
-# Cached loaders (A1 + A2)
+# Cached loaders
 # -------------------------
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_mao_tiers() -> pd.DataFrame:
-    raw = _read_csv(MAO_TIERS_URL)
+    client = _get_supabase_client()
+    resp = client.table("mao_tiers").select("county, tier, mao_min, mao_max").execute()
+    raw = pd.DataFrame(resp.data or [])
     return normalize_tiers(raw)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_data() -> pd.DataFrame:
-    raw = _read_csv(SHEET_URL)
+    client = _get_supabase_client()
 
+    cols = (
+        "property_address, county, transaction_link, path, assigned_buyer, "
+        "desired_closing_date, contract_release_date, dispositions_rep, "
+        "contract_purchase_price, amended_purchase_price, wholesale_sales_price, "
+        "market, acquisition_rep"
+    )
+    all_rows = []
+    page_size = 1000
+    offset = 0
+    while True:
+        resp = (
+            client.table("closed_deals")
+            .select(cols)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        batch = resp.data or []
+        all_rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+
+    raw = pd.DataFrame(all_rows)
+
+    # --- Rename Supabase columns → app column names ---
+    raw = raw.rename(columns={
+        "property_address":        "Address",
+        "county":                  "County",
+        "transaction_link":        "Salesforce_URL",
+        "assigned_buyer":          "Buyer",
+        "dispositions_rep":        "Dispo Rep",
+        "contract_purchase_price": "Contract Price",
+        "amended_purchase_price":  "Amended Price",
+        "wholesale_sales_price":   "Wholesale Price",
+        "market":                  "Market",
+        "acquisition_rep":         "Acquisition Rep",
+    })
+
+    # --- Map path → Status ---
+    # Supabase: "Closed/Won" | "Contract Cancelled/Lost"
+    path_map = {
+        "Closed/Won":                "Sold",
+        "Contract Cancelled/Lost":   "Cut Loose",
+    }
+    raw["Status"] = raw["path"].map(path_map).fillna(raw.get("path", ""))
+
+    # --- Derive Date: closing date for sold deals, release date for cut loose ---
+    # Coalesce: prefer desired_closing_date, fall back to contract_release_date
+    closing = pd.to_datetime(raw.get("desired_closing_date"), errors="coerce")
+    release = pd.to_datetime(raw.get("contract_release_date"), errors="coerce")
+    raw["Date"] = closing.combine_first(release)
+
+    # --- City: not stored in Supabase; add empty column so app doesn't break ---
+    raw["City"] = ""
+
+    # --- Validate required columns ---
     missing = [c for c in REQUIRED_COLS if c not in raw.columns]
     if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+        raise ValueError(f"Missing required columns after Supabase load: {missing}")
 
     df = normalize_inputs(raw)
 
-    # Merge tiers (keep app running if tiers sheet hiccups)
+    # --- Merge MAO tiers ---
     try:
         tiers = load_mao_tiers()
         if not tiers.empty:
@@ -274,7 +302,6 @@ def load_data() -> pd.DataFrame:
                 how="left",
             )
     except Exception as e:
-        # Internal app: keep running, but surface what happened.
         st.warning(f"Could not load/merge MAO tiers (showing blank tiers). Details: {type(e).__name__}")
         df["MAO_Tier"] = ""
         df["MAO_Range_Str"] = ""
