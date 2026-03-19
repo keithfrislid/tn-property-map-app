@@ -86,7 +86,7 @@ def normalize_inputs(df: pd.DataFrame) -> pd.DataFrame:
     optional_cols = [
         "Salesforce_URL", "Buyer", "Date", "Status", "County", "Address", "City",
         "Dispo Rep", "Contract Price", "Amended Price", "Wholesale Price",
-        "Market", "Acquisition Rep",
+        "Market", "Acquisition Rep", "RHD Buyer Agent Commission",
     ]
     for col in optional_cols:
         if col not in df.columns:
@@ -137,8 +137,15 @@ def normalize_inputs(df: pd.DataFrame) -> pd.DataFrame:
     has_amended = df["Amended_Price_num"].notna()
     df.loc[has_amended, "Effective_Contract_Price"] = df.loc[has_amended, "Amended_Price_num"]
 
-    # Gross Profit = Wholesale - Effective Contract
-    df["Gross_Profit"] = df["Wholesale_Price_num"] - df["Effective_Contract_Price"]
+    # RHD Buyer Agent Commission (NULL = 0, not subtracted)
+    df["RHD_Buyer_Agent_Commission_num"] = _to_number(df.get("RHD Buyer Agent Commission")).fillna(0)
+
+    # Gross Profit = Wholesale - Effective Contract - RHD Buyer Agent Commission
+    df["Gross_Profit"] = (
+        df["Wholesale_Price_num"]
+        - df["Effective_Contract_Price"]
+        - df["RHD_Buyer_Agent_Commission_num"]
+    )
 
     return df
 
@@ -231,10 +238,10 @@ def load_data() -> pd.DataFrame:
     client = _get_supabase_client()
 
     cols = (
-        "property_address, county, transaction_link, path, assigned_buyer, "
+        "property_address, city, county, transaction_link, path, assigned_buyer, "
         "desired_closing_date, contract_release_date, dispositions_rep, "
         "contract_purchase_price, amended_purchase_price, wholesale_sales_price, "
-        "market, acquisition_rep"
+        "market, acquisition_rep, rhd_buyer_agent_commission"
     )
     all_rows = []
     page_size = 1000
@@ -256,16 +263,18 @@ def load_data() -> pd.DataFrame:
 
     # --- Rename Supabase columns → app column names ---
     raw = raw.rename(columns={
-        "property_address":        "Address",
-        "county":                  "County",
-        "transaction_link":        "Salesforce_URL",
-        "assigned_buyer":          "Buyer",
-        "dispositions_rep":        "Dispo Rep",
-        "contract_purchase_price": "Contract Price",
-        "amended_purchase_price":  "Amended Price",
-        "wholesale_sales_price":   "Wholesale Price",
-        "market":                  "Market",
-        "acquisition_rep":         "Acquisition Rep",
+        "property_address":           "Address",
+        "city":                       "City",
+        "county":                     "County",
+        "transaction_link":           "Salesforce_URL",
+        "assigned_buyer":             "Buyer",
+        "dispositions_rep":           "Dispo Rep",
+        "contract_purchase_price":    "Contract Price",
+        "amended_purchase_price":     "Amended Price",
+        "wholesale_sales_price":      "Wholesale Price",
+        "market":                     "Market",
+        "acquisition_rep":            "Acquisition Rep",
+        "rhd_buyer_agent_commission": "RHD Buyer Agent Commission",
     })
 
     # --- Map path → Status ---
@@ -281,9 +290,6 @@ def load_data() -> pd.DataFrame:
     closing = pd.to_datetime(raw.get("desired_closing_date"), errors="coerce")
     release = pd.to_datetime(raw.get("contract_release_date"), errors="coerce")
     raw["Date"] = closing.combine_first(release)
-
-    # --- City: not stored in Supabase; add empty column so app doesn't break ---
-    raw["City"] = ""
 
     # --- Validate required columns ---
     missing = [c for c in REQUIRED_COLS if c not in raw.columns]
