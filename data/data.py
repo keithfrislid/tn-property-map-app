@@ -52,7 +52,7 @@ def _normalize_status(series: pd.Series) -> pd.Series:
     # Sold — covers "sold", "closed", "closedwon" (Supabase "Closed/Won")
     out.loc[compact.isin(["sold", "closed", "close", "closing", "settled", "closedwon"])] = "sold"
     # Cut Loose — covers "cutloose", "contractcancelledlost" (Supabase path)
-    out.loc[compact.isin(["cutloose", "cutlose", "cut", "contractcancelledlost"])] = "cut loose"
+    out.loc[compact.isin(["cutloose", "cutlose", "cut", "contractcancelledlost", "contractcanceledlost"])] = "cut loose"
     return out
 
 
@@ -282,6 +282,7 @@ def load_data() -> pd.DataFrame:
     path_map = {
         "Closed/Won":                "Sold",
         "Contract Cancelled/Lost":   "Cut Loose",
+        "Contract Canceled/Lost":    "Cut Loose",
     }
     raw["Status"] = raw["path"].map(path_map).fillna(raw.get("path", ""))
 
