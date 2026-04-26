@@ -77,6 +77,7 @@ def render_sales_manager_dashboard(
     *,
     headline: dict | None = None,
     county_table: pd.DataFrame | None = None,
+    df_cut_loose: pd.DataFrame | None = None,
 ) -> None:
     """Render the Admin financial dashboard.
 
@@ -225,18 +226,18 @@ def render_sales_manager_dashboard(
     ytd_m3.metric(f"{current_year} YTD Deals", f"{ytd_deals:,}", delta=deals_delta_pct)
     ytd_m4.metric(f"{prior_year} YTD Deals (same period)", f"{prior_ytd_deals:,}")
 
-    if not combined_ytd.empty:
-        _label_expr = (
-            "datum.value == 1 ? 'Jan' : datum.value == 2 ? 'Feb' : datum.value == 3 ? 'Mar' : "
-            "datum.value == 4 ? 'Apr' : datum.value == 5 ? 'May' : datum.value == 6 ? 'Jun' : "
-            "datum.value == 7 ? 'Jul' : datum.value == 8 ? 'Aug' : datum.value == 9 ? 'Sep' : "
-            "datum.value == 10 ? 'Oct' : datum.value == 11 ? 'Nov' : 'Dec'"
-        )
-        _ytd_colors = alt.Scale(
-            domain=[str(current_year), str(prior_year)],
-            range=["#4fc3f7", "#81c784"],
-        )
+    _label_expr = (
+        "datum.value == 1 ? 'Jan' : datum.value == 2 ? 'Feb' : datum.value == 3 ? 'Mar' : "
+        "datum.value == 4 ? 'Apr' : datum.value == 5 ? 'May' : datum.value == 6 ? 'Jun' : "
+        "datum.value == 7 ? 'Jul' : datum.value == 8 ? 'Aug' : datum.value == 9 ? 'Sep' : "
+        "datum.value == 10 ? 'Oct' : datum.value == 11 ? 'Nov' : 'Dec'"
+    )
+    _ytd_colors = alt.Scale(
+        domain=[str(current_year), str(prior_year)],
+        range=["#4fc3f7", "#81c784"],
+    )
 
+    if not combined_ytd.empty:
         ytd_left, ytd_right = st.columns(2)
         with ytd_left:
             st.markdown(f"##### Cumulative GP — {current_year} vs {prior_year}")
@@ -275,6 +276,93 @@ def render_sales_manager_dashboard(
         f"{prior_year} shown through {prior_cutoff_str} for an apples-to-apples comparison. "
         f"Green = ahead, red = behind vs prior year."
     )
+
+    # ---- Deals shopped + close ratio YTD ----
+    if df_cut_loose is not None and not df_cut_loose.empty:
+        st.divider()
+        st.markdown("#### Deals shopped & close ratio — YTD vs prior year")
+
+        df_cut = df_cut_loose.copy()
+        df_cut["Date_dt"] = pd.to_datetime(df_cut.get("Date_dt"), errors="coerce")
+        df_cut["_year"] = df_cut["Date_dt"].dt.year
+        df_cut["_month"] = df_cut["Date_dt"].dt.month
+        df_cut["_doy"] = df_cut["Date_dt"].dt.dayofyear
+        df_cut = df_cut.dropna(subset=["_year"])
+        df_cut["_year"] = df_cut["_year"].astype(int)
+
+        # Reuse the already-prepared sold frames from above
+        cy_cut = df_cut[df_cut["_year"] == current_year]
+        py_cut = df_cut[(df_cut["_year"] == prior_year) & (df_cut["_doy"] <= day_of_year)]
+
+        def _shopped_rows(sold_subset: pd.DataFrame, cut_subset: pd.DataFrame, label: str) -> list[dict]:
+            monthly_sold = sold_subset.groupby("_month").size()
+            monthly_cut = cut_subset.groupby("_month").size()
+            rows: list[dict] = []
+            cum_closed, cum_shopped = 0, 0
+            for m in range(1, current_month + 1):
+                closed_this = int(monthly_sold.get(m, 0))
+                cut_this = int(monthly_cut.get(m, 0))
+                cum_closed += closed_this
+                cum_shopped += closed_this + cut_this
+                close_ratio = round(cum_closed / cum_shopped * 100, 1) if cum_shopped else 0.0
+                rows.append({
+                    "Month": _MONTH_ABBR[m - 1],
+                    "Month_num": m,
+                    "Year": label,
+                    "Cumulative Shopped": cum_shopped,
+                    "Close Ratio (%)": close_ratio,
+                })
+            return rows
+
+        cy_shop_rows = _shopped_rows(cy_data, cy_cut, str(current_year))
+        py_shop_rows = _shopped_rows(py_data, py_cut, str(prior_year))
+        combined_shop = pd.DataFrame(cy_shop_rows + py_shop_rows)
+
+        ytd_shopped_cy = cy_shop_rows[-1]["Cumulative Shopped"] if cy_shop_rows else 0
+        ytd_shopped_py = py_shop_rows[-1]["Cumulative Shopped"] if py_shop_rows else 0
+        ytd_ratio_cy = cy_shop_rows[-1]["Close Ratio (%)"] if cy_shop_rows else 0.0
+        ytd_ratio_py = py_shop_rows[-1]["Close Ratio (%)"] if py_shop_rows else 0.0
+
+        shopped_delta = f"{(ytd_shopped_cy - ytd_shopped_py) / ytd_shopped_py * 100:+.1f}%" if ytd_shopped_py else "N/A"
+        ratio_delta = f"{ytd_ratio_cy - ytd_ratio_py:+.1f}pp" if ytd_ratio_py else "N/A"
+
+        sh_m1, sh_m2, sh_m3, sh_m4 = st.columns(4)
+        sh_m1.metric(f"{current_year} YTD Shopped", f"{ytd_shopped_cy:,}", delta=shopped_delta)
+        sh_m2.metric(f"{prior_year} YTD Shopped (same period)", f"{ytd_shopped_py:,}")
+        sh_m3.metric(f"{current_year} YTD Close Ratio", f"{ytd_ratio_cy:.1f}%", delta=ratio_delta)
+        sh_m4.metric(f"{prior_year} YTD Close Ratio (same period)", f"{ytd_ratio_py:.1f}%")
+
+        if not combined_shop.empty:
+            shop_left, shop_right = st.columns(2)
+            with shop_left:
+                st.markdown(f"##### Cumulative Deals Shopped — {current_year} vs {prior_year}")
+                shopped_cmp = (
+                    alt.Chart(combined_shop)
+                    .mark_line(point=True, strokeWidth=2)
+                    .encode(
+                        x=alt.X("Month_num:O", title="Month", axis=alt.Axis(labelExpr=_label_expr)),
+                        y=alt.Y("Cumulative Shopped:Q", title="Deals Shopped"),
+                        color=alt.Color("Year:N", scale=_ytd_colors),
+                        tooltip=["Month", "Year", "Cumulative Shopped"],
+                    )
+                )
+                st.altair_chart(shopped_cmp, use_container_width=True)
+
+            with shop_right:
+                st.markdown(f"##### Cumulative Close Ratio — {current_year} vs {prior_year}")
+                ratio_cmp = (
+                    alt.Chart(combined_shop)
+                    .mark_line(point=True, strokeWidth=2)
+                    .encode(
+                        x=alt.X("Month_num:O", title="Month", axis=alt.Axis(labelExpr=_label_expr)),
+                        y=alt.Y("Close Ratio (%):Q", title="Close Ratio (%)", scale=alt.Scale(domain=[0, 100])),
+                        color=alt.Color("Year:N", scale=_ytd_colors),
+                        tooltip=["Month", "Year", alt.Tooltip("Close Ratio (%):Q", format=".1f")],
+                    )
+                )
+                st.altair_chart(ratio_cmp, use_container_width=True)
+
+        st.caption("Shopped = closed (sold) + cut loose. Close ratio = cumulative closed ÷ cumulative shopped through each month.")
 
     # ---- Pies (light compute is fine) ----
     pie_left, pie_right = st.columns(2)

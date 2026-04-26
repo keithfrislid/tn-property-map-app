@@ -18,6 +18,7 @@ def render_admin_tabs(
     dashboard_headline: dict,
     county_gp_table: pd.DataFrame,
     map_kwargs: dict,
+    df_cut_loose_for_dashboard: pd.DataFrame | None = None,
 ) -> None:
     """Render Admin tabs (Dashboard + Map)."""
 
@@ -28,6 +29,7 @@ def render_admin_tabs(
             df_sold_only_for_dashboard,
             headline=dashboard_headline,
             county_table=county_gp_table,
+            df_cut_loose=df_cut_loose_for_dashboard,
         )
 
     with tab_map:

@@ -286,6 +286,7 @@ def run_app() -> None:
             dashboard_headline=admin_dashboard_headline,
             county_gp_table=admin_county_gp_table,
             map_kwargs=map_kwargs,
+            df_cut_loose_for_dashboard=df_time_cut_for_view,
         )
     elif team_view == "Acquisitions":
         render_acquisitions_tabs(
